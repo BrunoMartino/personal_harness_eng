@@ -1,11 +1,11 @@
 ---
 name: data-guardsman
 description: >-
-  Applies encryption at rest and in transit, key management practices, data
-  classification tiers, and handling rules for classified data in code and
-  infrastructure. Use when designing APIs, databases, storage, secrets,
-  cryptography, TLS, PII/PCI/PHI, logging masking, privacy, or tagging
-  DataClassification resources.
+  Applies encryption at rest and in transit, key and secrets management, data
+  classification tiers, secure credential/token handling, and injection-safe
+  data access for classified data in code and infrastructure. Use when
+  designing APIs, databases, storage, secrets, cryptography, TLS, PII/PCI/PHI,
+  logging masking, privacy, or tagging DataClassification resources.
 disable-model-invocation: true
 ---
 
@@ -19,165 +19,70 @@ When handling **stored or transmitted data**, **secrets**, or **classified infor
 
 If the project defines security or coding conventions that conflict, follow project harness docs first.
 
-## Encryption
+## Encryption in transit
 
-All data MUST be encrypted both at rest and in transit.
+- **TLS 1.2+ (prefer 1.3)** for all web, API, and service-to-service traffic; HSTS headers; validate certificates (never disable verification, even in "temporary" code).
+- **Database connections** over SSL/TLS with server certificate verification.
+- Consider **mTLS** for internal service authentication.
+- Never put sensitive data (tokens, PII) in **URLs or query strings** — they leak via logs, referrers, and history. Use headers or bodies.
 
-### Encryption in Transit
+## Encryption at rest
 
-All network communication must use encryption:
+- Enable database encryption at rest (RDS encryption, TDE) **including backups** and volumes.
+- Server-side encryption for object storage (S3, Blob) and local caches holding sensitive data.
+- Encrypt sensitive fields (PII, financial, tokens, session data, anything restricted/confidential) at the application level when the threat model requires it.
 
-1. **HTTPS/TLS**
-   - Use TLS 1.2 or higher (prefer TLS 1.3)
-   - Enforce HTTPS for all web traffic
-   - Use HSTS headers to prevent downgrade attacks
-   - Validate SSL/TLS certificates
+## Secrets management
 
-2. **API Communication**
-   - Use HTTPS for all API calls
-   - Never transmit sensitive data over unencrypted connections
-   - Validate server certificates
+- Never store secrets in plaintext, code, or version control. Use a secret manager (AWS Secrets Manager, Vault, Key Vault); `.env` files stay local and gitignored.
+- **Scan before commit**: run a secrets scanner (gitleaks/trufflehog) or review diffs for keys when touching config. A leaked secret is compromised — rotate it, don't just delete the line.
+- Backend-only exposure: secrets never reach frontend bundles, client config, or logs.
+- Define rotation (e.g. 90 days) for long-lived keys; prefer short-lived credentials where the platform allows.
+- Store only **hashes** of API keys you issue; validate webhooks by signature.
 
-3. **Database Connections**
-   - Enable SSL/TLS for database connections
-   - Use encrypted connection strings
-   - Verify server certificates
+## Keys & algorithms
 
-4. **Internal Service Communication**
-   - Use TLS for service-to-service communication
-   - Consider mutual TLS (mTLS) for service authentication
+- Symmetric: AES-256-GCM or ChaCha20-Poly1305. Asymmetric: RSA-2048+ (prefer 4096) or modern EC.
+- Passwords: **argon2id** (preferred) or bcrypt (cost ≥ 12) / PBKDF2 — never reversible encryption, never plain hashes.
+- Keys live in a KMS/HSM, separated from the data they protect; rotate and document procedures.
+- Use proven libraries; never roll your own crypto; ban MD5, SHA-1, DES, 3DES, RC4.
 
-### Encryption at Rest
+## Injection-safe data access
 
-All stored data must be encrypted:
+When code moves classified data in or out of stores:
 
-1. **Database Encryption**
-   - Enable encryption at rest for databases (e.g., AWS RDS encryption, Azure SQL TDE)
-   - Encrypt backups
-   - Use encrypted volumes
-
-2. **File Storage**
-   - Enable server-side encryption for object storage (e.g., S3, Azure Blob)
-   - Use encryption for file systems
-   - Encrypt local storage and caches
-
-3. **Secrets Management**
-   - Never store secrets in plaintext
-   - Use secret management services (AWS Secrets Manager, Azure Key Vault, HashiCorp Vault)
-   - Encrypt environment variables containing sensitive data
-   - Use encrypted configuration files
-
-4. **Sensitive Data Fields**
-   - Encrypt PII (Personally Identifiable Information)
-   - Encrypt financial data
-   - Encrypt authentication tokens and session data
-   - Encrypt any data marked as "restricted" or "confidential"
-
-### Key Management
-
-1. **Use Strong Keys**
-   - Minimum 256-bit keys for symmetric encryption (AES-256)
-   - Minimum 2048-bit keys for asymmetric encryption (RSA-2048, prefer RSA-4096)
-   - Prefer modern algorithms: AES-256-GCM, ChaCha20-Poly1305
-
-2. **Key Rotation**
-   - Rotate encryption keys regularly
-   - Implement automatic key rotation where possible
-   - Document key rotation procedures
-
-3. **Key Storage**
-   - Never hardcode encryption keys
-   - Use cloud provider KMS (Key Management Service)
-   - Separate key storage from encrypted data
-   - Use HSM (Hardware Security Module) for high-security requirements
-
-### Implementation Guidelines
-
-1. **Use Proven Libraries**
-   - Use well-established cryptography libraries
-   - Don't implement custom encryption algorithms
-   - Keep cryptographic libraries up to date
-
-2. **Default to Encrypted**
-   - Encryption should be the default, not an option
-   - Fail securely if encryption cannot be established
-
-3. **Verify Encryption**
-   - Test that encryption is actually enabled
-   - Monitor for unencrypted data transmission
-   - Audit encryption configurations regularly
-
-### What NOT to Do
-
-- Never roll your own crypto
-- Never store encryption keys with the encrypted data
-- Never use weak algorithms (MD5, SHA1, DES, 3DES, RC4)
-- Never transmit sensitive data over HTTP
-- Never store passwords in plaintext (use bcrypt, argon2, or PBKDF2)
-- Never commit secrets or keys to version control
+- **Parameterized queries / prepared statements only** — never string-concatenate user input into SQL/NoSQL/LDAP queries or shell commands.
+- Validate and normalize input at trust boundaries; encode output for its destination (HTML, headers, logs).
+- Session/auth cookies: `HttpOnly`, `Secure`, `SameSite` set.
 
 ## Data classification standard
 
-When writing code that handles data, automatically classify it and apply appropriate controls.
+Classify data the code touches and apply the matching controls:
 
-### PUBLIC
+| Tier | Examples | Controls |
+|------|----------|----------|
+| **PUBLIC** | product catalogs, marketing content | none required |
+| **INTERNAL** | employee directories, internal metrics | authentication required |
+| **CONFIDENTIAL** | contracts, financial reports | role-based access + audit logging |
+| **PII** | emails, phones, addresses, IPs, device IDs | encrypt at rest+transit; mask in logs (`u***@example.com`); audit access; GDPR/LGPD compliance; deletion path implemented |
+| **PCI** | card numbers, CVV, PAN | **never store raw card data**; processor tokens only; PCI-DSS |
+| **PHI** | medical records, diagnoses, prescriptions | encrypt everything; audit every access; HIPAA |
 
-Examples: product catalogs, public docs, marketing content  
-Controls: None required
+### Code requirements for classified data
 
-### INTERNAL
+1. Mark data classification in comments where non-obvious.
+2. Encrypt sensitive fields before storage; mask in logs (use IDs, not values).
+3. Audit logging for PII/PCI/PHI access (see [`audit-guardsman`](../audit-guardsman/SKILL.md)).
+4. Data minimization — collect and retain only what's needed; implement deletion/anonymization for privacy requests.
+5. Tag infrastructure resources with `DataClassification`.
+6. Anonymize/pseudonymize before sending anything to analytics or third parties.
 
-Examples: employee directories, internal metrics, roadmaps  
-Controls: Authentication required
+## Red flags to catch in review
 
-### CONFIDENTIAL
-
-Examples: contracts, financial reports, strategic plans  
-Controls: Role-based access, audit logging required
-
-### PII (Personally Identifiable Information)
-
-Examples: emails, phone numbers, addresses, names, IP addresses, device IDs  
-Controls:
-
-- Encrypt at rest and in transit
-- Mask in logs: `user@example.com` → `u***@example.com`
-- Audit all access
-- GDPR/privacy compliance required
-
-### PCI (Payment Card Industry)
-
-Examples: credit card numbers, CVV, full PAN  
-Controls:
-
-- **NEVER store raw card data**
-- Use payment processor tokens only
-- PCI-DSS compliance required
-
-### PHI (Protected Health Information)
-
-Examples: medical records, diagnoses, prescriptions, health data  
-Controls:
-
-- Encrypt all PHI
-- Audit every access
-- HIPAA compliance required
-
-### Code requirements
-
-**When handling classified data:**
-
-1. Add comments marking data classification
-2. Encrypt sensitive fields before storage
-3. Mask sensitive data in logs (use IDs, not values)
-4. Add audit logging for PII/PCI/PHI access
-5. Apply data minimization (only collect what's needed)
-6. Tag infrastructure resources with `DataClassification` tag
-
-**Red flags to catch:**
-
-- Logging PII/PCI/PHI values directly
-- Storing credit card data
-- Missing encryption for PII/PHI
-- Sending sensitive data to analytics without anonymization
-- Missing audit logs for sensitive operations
+- Logging PII/PCI/PHI values directly, or secrets in error messages/stack traces sent to users
+- Storing raw card data or plaintext passwords
+- Sensitive data in URLs, query strings, or frontend state
+- String-built queries with user input
+- Disabled TLS/certificate verification
+- Missing encryption for PII/PHI; missing audit logs for sensitive operations
+- Secrets committed to version control or baked into images
